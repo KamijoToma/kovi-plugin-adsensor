@@ -1,19 +1,19 @@
-/// This plugin is designed to prevent spam messages in groups by requiring users to react to a message before they can send messages.
-///
-/// Support only **Kovi Bot** and **NapCat** backend.
-///
-/// Author: KamijoToma(Github)
-///
-/// This file is licensed under the Apache License, Version 2.0 (the "License");
-/// you may not use this file except in compliance with the License.
-///
-/// Usage:
-/// 1. Add this plugin to your Kovi bot (https://github.com/ThriceCola/Kovi) and configure the OneBot backend (we use NapCat).
-/// 2. Configure the plugin by creating a `config.toml` file in the bot's data directory with the following content:
-/// ```toml
-/// kick_timeout = 300
-/// ```
-/// 3. The `kick_timeout` value is the time in seconds after which a user will be kicked if they do not react to the message.
+//! This plugin is designed to prevent spam messages in groups by requiring users to react to a message before they can send messages.
+//!
+//! Support only **Kovi Bot** and **NapCat** backend.
+//!
+//! Author: KamijoToma(GitHub)
+//!
+//! This file is licensed under the Apache License, Version 2.0 (the "License");
+//! you may not use this file except in compliance with the License.
+//!
+//! Usage:
+//! 1. Add this plugin to your Kovi bot (https://github.com/ThriceCola/Kovi) and configure the OneBot backend (we use NapCat).
+//! 2. Configure the plugin by creating a `config.toml` file in the bot's data directory with the following content:
+//! ```toml
+//! kick_timeout = 300
+//! ```
+//! 3. The `kick_timeout` value is the time in seconds after which a user will be kicked if they do not react to the message.
 
 use std::collections::HashMap;
 use std::error::Error;
@@ -270,33 +270,31 @@ async fn main() {
                 } else {
                     None
                 }
-            } else {
-                if user_is_admin {
-                    // Find if this message is a reaction message, if so, remove it
-                    if let Some(m) = user_reactions.iter().find_map(|(k, r)| if r.message_id == message_id { Some(*k)} else { None}) {
-                        log::info!("Admin {user_id} removed reaction message {message_id} in group {group_id}");
-                        Some(m)
-                    } else {
-                        None
-                    }
+            } else if user_is_admin {
+                // Find if this message is a reaction message, if so, remove it
+                if let Some(m) = user_reactions.iter().find_map(|(k, r)| if r.message_id == message_id { Some(*k)} else { None}) {
+                    log::info!("Admin {user_id} removed reaction message {message_id} in group {group_id}");
+                    Some(m)
                 } else {
-                    // Find if the user is an invitor of other member, if so, remove it
-                    if let Some(m) = user_reactions.iter().find_map(|(k, r)| {
-                        if let Some(invitor_user_id) = r.invitor_user_id {
-                            if invitor_user_id == user_id {
-                                Some(*k)
-                            } else {
-                                None
-                            }
+                    None
+                }
+            } else {
+                // Find if the user is an invitor of other member, if so, remove it
+                if let Some(m) = user_reactions.iter().find_map(|(k, r)| {
+                    if let Some(invitor_user_id) = r.invitor_user_id {
+                        if invitor_user_id == user_id {
+                            Some(*k)
                         } else {
                             None
                         }
-                    }) {
-                        log::info!("User {user_id} is an invitor of other member, removing reaction message {message_id} in group {group_id}");
-                        Some(m)
                     } else {
                         None
                     }
+                }) {
+                    log::info!("User {user_id} is an invitor of other member, removing reaction message {message_id} in group {group_id}");
+                    Some(m)
+                } else {
+                    None
                 }
             }
         } else {
@@ -427,7 +425,7 @@ async fn main() {
         message.push_text(" 欢迎 ");
         message.push_text(format!("{user_id} 加入群聊！请注意，为了防止 spam 信息传播，请你给此条消息点按任意 reaction 解禁（长按本消息并点击上方弹出的任意表情），否则你发布的所有消息均将被撤回并在一段时间后被踢出群聊。"));
         if let Some(invitor_user_id) = inventor_user_id {
-            message.push_text(format!("你是由 {} 邀请加入群聊的，如果你未通过验证，邀请人将被一并踢出群聊。", invitor_user_id));
+            message.push_text(format!("你是由 {invitor_user_id} 邀请加入群聊的，如果你未通过验证，邀请人将被一并踢出群聊。"));
         }
         let reaction_message_id = match BOT.send_group_msg_return(group_id, message).await {
             Ok(msg_id) => msg_id,
