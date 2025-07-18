@@ -1,12 +1,12 @@
 /// This plugin is designed to prevent spam messages in groups by requiring users to react to a message before they can send messages.
-/// 
+///
 /// Support only **Kovi Bot** and **NapCat** backend.
-/// 
+///
 /// Author: KamijoToma(Github)
-/// 
+///
 /// This file is licensed under the Apache License, Version 2.0 (the "License");
 /// you may not use this file except in compliance with the License.
-/// 
+///
 /// Usage:
 /// 1. Add this plugin to your Kovi bot (https://github.com/ThriceCola/Kovi) and configure the OneBot backend (we use NapCat).
 /// 2. Configure the plugin by creating a `config.toml` file in the bot's data directory with the following content:
@@ -20,7 +20,7 @@ use std::error::Error;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use config::{Config, ConfigError};
-use kovi::{log, serde_json, tokio, Message, PluginBuilder as plugin, PluginBuilder, RuntimeBot};
+use kovi::{log, serde_json, tokio, ApiReturn, Message, PluginBuilder as plugin, PluginBuilder, RuntimeBot};
 use kovi::bot::runtimebot::onebot_api::AddRequestType;
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
@@ -43,6 +43,7 @@ struct PluginConfig {
 struct MessageReaction {
     message_id: i32,
     start_time: chrono::DateTime<chrono::Local>,
+    invitor_user_id: Option<UserId>,
 }
 
 fn load_config() -> Result<PluginConfig, ConfigError> {
@@ -79,12 +80,14 @@ fn spawn_kick_user_after_delay(
     let bot = BOT.clone();
     tokio::spawn(async move {
         tokio::time::sleep(delay).await;
+        let inventor_user_id;
         // Check if the user has reacted to the message
         let group_reactions = GROUP_REACTIONS.read().unwrap();
         if let Some(user_reactions) = group_reactions.get(&group_id) {
-            if user_reactions.contains_key(&user_id) {
+            if let Some(message_reaction) = user_reactions.get(&user_id) {
                 // User has reacted, do nothing
                 log::info!("User {user_id} has not reacted to the message in group {group_id}, kicking them out");
+                inventor_user_id = message_reaction.invitor_user_id;
             } else { 
                 log::info!("User {user_id} has reacted to the message in group {group_id}, not kicking them out");
                 return;
@@ -94,7 +97,11 @@ fn spawn_kick_user_after_delay(
             return;
         }
         
-        bot.set_group_kick(group_id, user_id, false)
+        bot.set_group_kick(group_id, user_id, false);
+        if let Some(invitor_user_id) = inventor_user_id {
+            // kick the invitor user as well
+            bot.set_group_kick(group_id, invitor_user_id, false);
+        }
     });
 }
 
@@ -129,7 +136,7 @@ async fn main() {
                 return;
             }
         };
-        
+
         let flag_str = match original_obj.get("flag") {
             Some(flag) => match flag.as_str() {
                 Some(flag) => flag,
@@ -245,26 +252,58 @@ async fn main() {
             }
         };
 
+        // Check if the user is an admin or owner
+        let user_is_admin = match get_group_member_role(group_id, user_id).await {
+            Ok(Some(role)) => role == "admin" || role == "owner",
+            _ => false
+        };
+
         // Check if the reaction message is in GROUP_REACTIONS
         let group_reactions = GROUP_REACTIONS.read().unwrap();
-        let should_remove_entry = if let Some(user_reactions) = group_reactions.get(&group_id) {
+        let remove_user_id: Option<UserId> = if let Some(user_reactions) = group_reactions.get(&group_id) {
             if let Some(reaction) = user_reactions.get(&user_id) {
                 // Check if the reaction message is the same as the last one
                 if reaction.message_id == message_id {
                     // Remove the reaction message from GROUP_REACTIONS
                     log::info!("Removing reaction message {message_id} in group {group_id} from user {user_id}");
-                    true
+                    Some(user_id)
                 } else {
-                    false
+                    None
                 }
             } else {
-                false
+                if user_is_admin {
+                    // Find if this message is a reaction message, if so, remove it
+                    if let Some(m) = user_reactions.iter().find_map(|(k, r)| if r.message_id == message_id { Some(*k)} else { None}) {
+                        log::info!("Admin {user_id} removed reaction message {message_id} in group {group_id}");
+                        Some(m)
+                    } else {
+                        None
+                    }
+                } else {
+                    // Find if the user is an invitor of other member, if so, remove it
+                    if let Some(m) = user_reactions.iter().find_map(|(k, r)| {
+                        if let Some(invitor_user_id) = r.invitor_user_id {
+                            if invitor_user_id == user_id {
+                                Some(*k)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    }) {
+                        log::info!("User {user_id} is an invitor of other member, removing reaction message {message_id} in group {group_id}");
+                        Some(m)
+                    } else {
+                        None
+                    }
+                }
             }
         } else {
-            false
+            None
         };
         drop(group_reactions);
-        if should_remove_entry {
+        if let Some(user_id) = remove_user_id {
             let mut group_reactions = GROUP_REACTIONS.write().unwrap();
             if let Some(user_reactions) = group_reactions.get_mut(&group_id) {
                 user_reactions.remove(&user_id);
@@ -276,7 +315,7 @@ async fn main() {
             }
         }
     });
-    
+
     let kick_timeout = config.kick_timeout;
     
     plugin::on_notice(move |event| async move {
@@ -333,12 +372,63 @@ async fn main() {
             }
         };
 
+        let sub_type = match original_obj.get("sub_type") {
+            Some(sub_type) => match sub_type.as_str() {
+                Some(sub_type) => sub_type,
+                None => {
+                    log::warn!("sub_type is not a string");
+                    return;
+                }
+            },
+            None => {
+                log::warn!("Notice without sub_type");
+                return;
+            }
+        };
+
+        let inventor_user_id: Option<UserId> = if sub_type == "invite" {
+            match original_obj.get("operator_id") {
+                Some(id) => match id.as_i64() {
+                    Some(id) => Some(id),
+                    None => {
+                        log::warn!("invitor_user_id is not an integer");
+                        None
+                    }
+                },
+                None => {
+                    log::warn!("Notice without invitor_user_id");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        if inventor_user_id.is_some() && let Ok(inventor_user_info) = BOT.get_group_member_info(group_id, inventor_user_id.unwrap(), false).await {
+            if let Some(resp_obj) = inventor_user_info.data.as_object() {
+                if let Some(role) = resp_obj.get("role") {
+                    if role.as_str() != Some("owner") && role.as_str() != Some("admin") {
+                        log::info!("Admin invited user. No captcha required.");
+                        let mut message = Message::new();
+                        message.push_at(user_id.to_string().as_str());
+                        message.push_text(" 欢迎你加入群聊！由于你是被管理员邀请加入群聊，你无需进行任何操作即可发言。");
+                        BOT.send_group_msg(group_id, message);
+                        return;
+                    }
+                }
+            }
+        }
+
         // Wait 2s
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         // Send a welcome message
         let mut message = Message::new();
         message.push_at(user_id.to_string().as_str());
-        message.push_text(format!("欢迎 {user_id} 加入群聊！请注意，为了防止 spam 信息传播，请你给此条消息点按任意 reaction 解禁（长按本消息并点击上方弹出的任意表情），否则你发布的所有消息均将被撤回并在一段时间后被踢出群聊。"));
+        message.push_text(" 欢迎 ");
+        message.push_text(format!("{user_id} 加入群聊！请注意，为了防止 spam 信息传播，请你给此条消息点按任意 reaction 解禁（长按本消息并点击上方弹出的任意表情），否则你发布的所有消息均将被撤回并在一段时间后被踢出群聊。"));
+        if let Some(invitor_user_id) = inventor_user_id {
+            message.push_text(format!("你是由 {} 邀请加入群聊的，如果你未通过验证，邀请人将被一并踢出群聊。", invitor_user_id));
+        }
         let reaction_message_id = match BOT.send_group_msg_return(group_id, message).await {
             Ok(msg_id) => msg_id,
             Err(e) => {
@@ -353,8 +443,24 @@ async fn main() {
             user_reactions.insert(user_id, MessageReaction {
                 message_id: reaction_message_id,
                 start_time: chrono::Local::now(),
+                invitor_user_id: inventor_user_id,
             });
         }
         spawn_kick_user_after_delay(group_id, user_id, Duration::from_secs(kick_timeout));
     })
+}
+
+async fn get_group_member_role(
+    group_id: GroupId,
+    user_id: UserId,
+) -> Result<Option<String>, ApiReturn> {
+    let member_info = BOT.get_group_member_info(group_id, user_id, false).await?;
+    if let Some(data) = member_info.data.as_object() {
+        if let Some(role) = data.get("role") {
+            if let Some(role_str) = role.as_str() {
+                return Ok(Some(role_str.to_string()));
+            }
+        }
+    }
+    Ok(None)
 }
