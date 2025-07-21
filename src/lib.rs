@@ -289,7 +289,7 @@ async fn handler_group_msg_emoji_like_notice(event: Arc<NoticeEvent>) {
     if let Some(user_id) = remove_user_id {
         let mut group_reactions = GROUP_REACTIONS.write().unwrap();
         if let Some(user_reactions) = group_reactions.get_mut(&group_id) {
-            user_reactions.remove(&user_id);
+            let reaction_item = user_reactions.remove(&user_id);
             // Send a message to the group to notify that the reaction was removed
             let mut message = Message::new();
             message.push_at(user_id.to_string().as_str());
@@ -299,6 +299,12 @@ async fn handler_group_msg_emoji_like_notice(event: Arc<NoticeEvent>) {
                 message.push_text(" 感谢点按 reaction，已解禁，你可以自由发言了。");
             }
             BOT.send_group_msg(group_id, message);
+            // Revoke the reaction message
+            if let Some(reaction) = reaction_item {
+                BOT.delete_msg(reaction.message_id);
+            } else {
+                log::warn!("No reaction message found for user {user_id} in group {group_id}");
+            }
         }
     }
 }
@@ -336,8 +342,19 @@ async fn handler_group_new_member_join_notice(event: Arc<NoticeEvent>) {
         return;
     }
     let user_id = user_id.unwrap();
+    
+    let sub_type = original_obj.get("sub_type").and_then(|id| id.as_str());
+    if sub_type.is_none() {
+        log::warn!("Notice without sub_type");
+        return;
+    }
+    let sub_type = sub_type.unwrap();
 
-    let invitor_user_id = original_obj.get("operator_id").and_then(|id| id.as_i64());
+    let invitor_user_id = if sub_type == "invite" {
+        original_obj.get("operator_id").and_then(|id| id.as_i64())
+    } else {
+        None
+    };
 
     if let Some(invitor_user_id) = invitor_user_id
         && group_member_is_admin(group_id, invitor_user_id).await
